@@ -28,6 +28,7 @@ from pyrit.prompt_target.openai.openai_sora_target import OpenAISoraTarget
 from pyrit.prompt_target.openai.openai_tts_target import OpenAITTSTarget
 from pyrit.prompt_target.playwright_target import PlaywrightTarget
 from pyrit.prompt_target.prompt_shield_target import PromptShieldTarget
+from pyrit.prompt_target.replicate_target import ReplicateTarget
 from pyrit.prompt_target.text_target import TextTarget
 
 __all__ = [
@@ -55,5 +56,6 @@ __all__ = [
     "PromptShieldTarget",
     "PromptTarget",
     "RealtimeTarget",
+    "ReplicateTarget",
     "TextTarget",
 ]
