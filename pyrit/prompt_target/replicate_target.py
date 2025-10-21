@@ -48,6 +48,7 @@ class ReplicateTarget(PromptChatTarget):
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
         repetition_penalty: Optional[float] = None,
+        is_json_supported: bool = True,
         max_requests_per_minute: Optional[int] = None,
         **kwargs,
     ):
@@ -62,6 +63,7 @@ class ReplicateTarget(PromptChatTarget):
         self.top_p = top_p
         self.top_k = top_k
         self.repetition_penalty = repetition_penalty
+        self._is_json_supported = is_json_supported
         
         if not self.api_token:
             raise ValueError("REPLICATE_API_TOKEN environment variable or api_token parameter required")
@@ -74,9 +76,19 @@ class ReplicateTarget(PromptChatTarget):
         self._validate_request(prompt_request=prompt_request)
         request_piece: PromptRequestPiece = prompt_request.request_pieces[0]
         
+        # Add JSON formatting instructions if needed
+        prompt_text = request_piece.converted_value
+        
+        # Check if this looks like it needs JSON output (contains schema or format instructions)
+        if self._is_json_supported and ("json" in prompt_text.lower() or "{" in prompt_text):
+            # Add strong JSON formatting guidance
+            prompt_text = f"""{prompt_text}
+
+IMPORTANT: You MUST respond with ONLY valid JSON. Do not include any text before or after the JSON object. Your entire response must be parseable JSON."""
+        
         # Build input parameters matching Replicate API format
         input_params = {
-            "prompt": request_piece.converted_value,
+            "prompt": prompt_text,
             "max_new_tokens": self.max_new_tokens,
         }
         
@@ -123,24 +135,36 @@ class ReplicateTarget(PromptChatTarget):
             prediction_response.raise_for_status()
             prediction = prediction_response.json()
             
-            logger.info(f"Prediction created with ID: {prediction.get('id')}, Status: {prediction.get('status')}")
+            prediction_id = prediction.get('id')
+            status = prediction.get('status')
+            logger.info(f"Prediction created with ID: {prediction_id}, Status: {status}")
             
-            if self.use_wait:
-                # Synchronous response - output is already in the response
+            # Handle based on status
+            if status == "succeeded":
+                # Already completed - extract output directly
                 response_text = self._extract_output(prediction)
-            elif self.stream:
-                # Handle streaming response
-                response_text = await self._handle_stream_response(
-                    client=client,
-                    stream_url=prediction["urls"]["stream"]
-                )
+            elif status in ["starting", "processing"]:
+                # Not complete yet - need to poll/stream
+                if self.stream and not self.use_wait:
+                    # Use streaming
+                    response_text = await self._handle_stream_response(
+                        client=client,
+                        stream_url=prediction["urls"]["stream"]
+                    )
+                else:
+                    # Use polling (even if use_wait=True, we need to poll if not complete)
+                    logger.info(f"Prediction not complete, polling for results...")
+                    response_text = await self._wait_for_completion(
+                        client=client,
+                        prediction_id=prediction_id,
+                        headers={k: v for k, v in headers.items() if k != "Prefer"}
+                    )
+            elif status == "failed":
+                error = prediction.get("error", "Unknown error")
+                raise RuntimeError(f"Replicate prediction failed immediately: {error}")
             else:
-                # Handle non-streaming response (poll for completion)
-                response_text = await self._wait_for_completion(
-                    client=client,
-                    prediction_id=prediction["id"],
-                    headers=headers
-                )
+                # Unknown status
+                raise RuntimeError(f"Unexpected prediction status: {status}")
         
         return construct_response_from_request(
             request=request_piece,
@@ -152,11 +176,40 @@ class ReplicateTarget(PromptChatTarget):
         output = prediction.get("output", "")
         
         if isinstance(output, list):
-            return "".join(output)
+            text = "".join(output)
         elif isinstance(output, str):
-            return output
+            text = output
         else:
-            return str(output)
+            text = str(output)
+        
+        # If JSON mode is enabled, try to extract JSON from the response
+        if self._is_json_supported:
+            text = self._extract_json_from_text(text)
+        
+        return text
+    
+    def _extract_json_from_text(self, text: str) -> str:
+        """
+        Extract JSON object from text that might have extra content.
+        Tries to find and extract the JSON portion if present.
+        """
+        import re
+        
+        # Try to find JSON object in the text
+        # Look for text between first { and last }
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            potential_json = json_match.group(0)
+            # Validate it's actually JSON
+            try:
+                json.loads(potential_json)
+                return potential_json
+            except json.JSONDecodeError:
+                pass
+        
+        # If no valid JSON found, return original text
+        # The calling code will handle the error
+        return text
     
     async def _handle_stream_response(self, client: httpx.AsyncClient, stream_url: str) -> str:
         """Handle streaming Server-Sent Events from Replicate"""
@@ -196,6 +249,10 @@ class ReplicateTarget(PromptChatTarget):
                         logger.warning(f"Could not parse SSE line: {line}")
                         continue
         
+        # Extract JSON if needed
+        if self._is_json_supported:
+            full_response = self._extract_json_from_text(full_response)
+        
         return full_response
     
     async def _wait_for_completion(
@@ -221,8 +278,15 @@ class ReplicateTarget(PromptChatTarget):
             if status == "succeeded":
                 output = data.get("output", "")
                 if isinstance(output, list):
-                    return "".join(output)
-                return str(output)
+                    text = "".join(output)
+                else:
+                    text = str(output)
+                
+                # Extract JSON if needed
+                if self._is_json_supported:
+                    text = self._extract_json_from_text(text)
+                
+                return text
             
             elif status == "failed":
                 error = data.get("error", "Unknown error")
@@ -251,6 +315,9 @@ class ReplicateTarget(PromptChatTarget):
             raise ValueError(f"This target only supports text prompts. Received: {piece_type}")
     
     def is_json_response_supported(self) -> bool:
-        """Replicate doesn't support JSON response format natively"""
-        return False
+        """
+        Returns whether JSON response format is supported.
+        When True, the target will add instructions to output JSON format.
+        """
+        return self._is_json_supported
 
