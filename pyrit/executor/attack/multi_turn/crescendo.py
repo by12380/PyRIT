@@ -497,7 +497,30 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
             raise ValueError("No response received from adversarial chat")
 
         response_text = response.get_value()
-        return remove_markdown_json(response_text)
+        cleaned_response = remove_markdown_json(response_text)
+        
+        # Log attacker outputs to W&B if available (works for all target types)
+        try:
+            import wandb
+            if wandb.run is not None:
+                # Get attacker model name
+                attacker_id = self._adversarial_chat.get_identifier()
+                model_name = attacker_id.get("__type__", "Unknown")
+                
+                # Accumulate in class variable for later table creation
+                if not hasattr(CrescendoAttack, '_wandb_attacker_outputs'):
+                    CrescendoAttack._wandb_attacker_outputs = []
+                
+                CrescendoAttack._wandb_attacker_outputs.append([
+                    model_name,
+                    prompt_text[:200] + "..." if len(prompt_text) > 200 else prompt_text,
+                    cleaned_response,
+                    len(cleaned_response)
+                ])
+        except (ImportError, Exception):
+            pass
+        
+        return cleaned_response
 
     def _parse_adversarial_response(self, response_text: str) -> str:
         """
@@ -516,7 +539,14 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
 
         try:
             parsed_output = json.loads(response_text)
-
+            
+            # COMPATIBILITY FIX: Handle models that nest data inside JSON schema structure
+            # Some models (like Gemma 2 2B) return: {"type": "object", "properties": {data}}
+            # Instead of the correct format: {data}
+            if "type" in parsed_output and "properties" in parsed_output:
+                logger.info("Detected nested JSON schema format, extracting from 'properties'")
+                parsed_output = parsed_output["properties"]
+            
             # Check for required keys
             missing_keys = expected_keys - set(parsed_output.keys())
             if missing_keys:
