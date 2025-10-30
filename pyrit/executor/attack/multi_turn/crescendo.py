@@ -512,6 +512,7 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
                     CrescendoAttack._wandb_attacker_outputs = []
                 
                 CrescendoAttack._wandb_attacker_outputs.append([
+                    context.objective,  # Which jailbreak question this is for
                     model_name,
                     prompt_text[:200] + "..." if len(prompt_text) > 200 else prompt_text,
                     cleaned_response,
