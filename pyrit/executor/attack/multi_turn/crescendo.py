@@ -3,9 +3,11 @@
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
+from datetime import datetime
 
 from pyrit.common.path import DATASETS_PATH
 from pyrit.common.utils import combine_dict
@@ -60,6 +62,12 @@ class CrescendoAttackContext(MultiTurnAttackContext):
 
     # Counter for number of backtracks performed during the attack
     backtrack_count: int = 0
+
+    # The prompt that generated the last response (for debugging/logging)
+    last_prompt: Optional[str] = None
+
+    # Timestamp for the entire attack run (used for consistent file naming)
+    run_timestamp: Optional[str] = None
 
 
 @dataclass
@@ -289,6 +297,73 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         # Initialize backtrack count in context
         context.backtrack_count = 0
 
+    def _save_prompt_to_jsonl(self, prompt: str, scenario: str, context: CrescendoAttackContext) -> None:
+        """
+        Save the full conversation history to a single JSONL file with scenario metadata.
+        
+        Args:
+            prompt: The last prompt text (kept for backward compatibility, but we'll use full conversation)
+            scenario: One of "refusal", "jailbroken", "not_jailbroken"
+            context: The attack context for additional metadata
+        """
+        # Create prompts directory if it doesn't exist
+        prompts_dir = Path("prompts")
+        prompts_dir.mkdir(exist_ok=True)
+        
+        # Use run-level timestamp if available, otherwise generate one
+        if context.run_timestamp:
+            timestamp_str = context.run_timestamp
+        else:
+            # Fallback: generate timestamp in dd-hh-mm format
+            now = datetime.now()
+            timestamp_str = now.strftime("%d-%H-%M")
+        
+        # Use a single JSONL file for all scenarios with timestamp
+        jsonl_file = prompts_dir / f"crescendo_prompts_{timestamp_str}.jsonl"
+        
+        # Get full conversation history from memory
+        conversation_history = []
+        try:
+            memory = CentralMemory.get_memory_instance()
+            conversation_responses = memory.get_conversation(conversation_id=context.session.conversation_id)
+            
+            # Format conversation as list of user/assistant messages
+            for response in conversation_responses:
+                for piece in response.request_pieces:
+                    # Only include user and assistant messages (skip system)
+                    if piece.role in ["user", "assistant"]:
+                        conversation_history.append({
+                            "role": piece.role,
+                            "content": piece.converted_value if piece.converted_value else piece.original_value
+                        })
+            
+            # Extract the last assistant turn as the response before removing it
+            last_response = None
+            if conversation_history and conversation_history[-1]["role"] == "assistant":
+                last_response = conversation_history[-1]["content"]
+                conversation_history.pop()
+                
+        except Exception as e:
+            self._logger.warning(f"Could not retrieve conversation history: {e}")
+            # Fallback to just the last prompt if we can't get full history
+            conversation_history = [{"role": "user", "content": prompt}]
+            last_response = None
+        
+        # Create entry with metadata
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "scenario": scenario,
+            "turn": context.executed_turns + 1,  # +1 because we haven't incremented yet
+            "backtrack_count": context.backtrack_count,
+            "objective": context.objective,
+            "conversation_history": conversation_history,
+            "response": last_response,
+        }
+        
+        # Append to JSONL file
+        with open(jsonl_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
     async def _perform_async(self, *, context: CrescendoAttackContext) -> CrescendoAttackResult:
         """
         Execute the Crescendo attack by iteratively generating prompts,
@@ -304,6 +379,11 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         # Log the attack configuration
         self._logger.info(f"Starting crescendo attack with objective: {context.objective}")
         self._logger.info(f"Max turns: {self._max_turns}, Max backtracks: {self._max_backtracks}")
+
+        # Set run-level timestamp for consistent file naming (if not already set)
+        if not context.run_timestamp:
+            now = datetime.now()
+            context.run_timestamp = now.strftime("%d-%H-%M")
 
         # Attack Execution Flow:
         # 1) Generate the next prompt (custom prompt or via adversarial chat)
@@ -334,6 +414,9 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
                 context=context,
             )
 
+            # Store the prompt that generated this response
+            context.last_prompt = prompt_to_send
+
             # Check for refusal and backtrack if needed
             backtracked = await self._perform_backtrack_if_refused_async(
                 context=context,
@@ -349,6 +432,13 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
 
             # Check if objective achieved
             achieved_objective = self._score_evaluator.is_objective_achieved(score=context.last_score)
+
+            # Save the prompt based on the outcome to JSONL
+            if context.last_prompt:
+                if achieved_objective:
+                    self._save_prompt_to_jsonl(context.last_prompt, "jailbroken", context)
+                else:
+                    self._save_prompt_to_jsonl(context.last_prompt, "not_jailbroken", context)
 
             # Increment the executed turns
             context.executed_turns += 1
@@ -654,6 +744,15 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
             raise RuntimeError("No objective scores returned from scoring process.")
 
         score = objective_score[0]
+        
+        # Log the prompt that generated this response (for debugging)
+        if context.last_prompt:
+            self._logger.debug(f"Prompt that generated response: {context.last_prompt[:200]}...")
+            # You can also save it to a file, database, or add it to score metadata here
+            # Example: save to file
+            # with open(f"prompts/prompt_{context.executed_turns}.txt", "w") as f:
+            #     f.write(context.last_prompt)
+        
         self._logger.debug(f"Objective score: {score.get_value():.2f} - {score.score_rationale}")
         return score
 
@@ -798,6 +897,10 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         self._logger.info(
             f"Response refused, backtracking (attempt {context.backtrack_count + 1}/{self._max_backtracks})"
         )
+        
+        # Save the prompt that generated the refused response to JSONL
+        if context.last_prompt:
+            self._save_prompt_to_jsonl(context.last_prompt, "refusal", context)
 
         # Store refused text for next iteration
         context.refused_text = prompt_sent

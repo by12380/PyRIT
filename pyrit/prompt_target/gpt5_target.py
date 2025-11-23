@@ -26,6 +26,7 @@ class GPT5Target(PromptChatTarget):
         reasoning_effort (str): Reasoning effort level - "minimal", "low", "medium", "high"
         temperature (float, Optional): Temperature for generation
         max_requests_per_minute (int, Optional): Rate limiting
+        system_prompt (str, Optional): Custom system prompt to prepend to conversation
     """
 
     def __init__(
@@ -35,6 +36,7 @@ class GPT5Target(PromptChatTarget):
         reasoning_effort: str = "minimal",
         temperature: Optional[float] = None,
         max_requests_per_minute: Optional[int] = None,
+        system_prompt: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(max_requests_per_minute=max_requests_per_minute)
@@ -44,6 +46,7 @@ class GPT5Target(PromptChatTarget):
         self._reasoning_effort = reasoning_effort
         self._temperature = temperature
         self._model_name = "gpt-5"
+        self._system_prompt = system_prompt
         
         if not self._api_key:
             raise ValueError("OPENAI_API_KEY environment variable or api_key parameter required")
@@ -96,6 +99,13 @@ class GPT5Target(PromptChatTarget):
         """Build chat messages from conversation history"""
         messages = []
         
+        # Add system prompt if provided (only once at the beginning)
+        if self._system_prompt and not self._memory.get_conversation(conversation_id=conversation_id):
+            messages.append({
+                "role": "developer",
+                "content": self._system_prompt
+            })
+        
         # Get conversation history from memory
         conversation_history = self._memory.get_conversation(conversation_id=conversation_id)
         
@@ -115,6 +125,8 @@ class GPT5Target(PromptChatTarget):
                 "role": piece.role,
                 "content": piece.converted_value
             })
+
+        print(f"💬 Messages: {messages}")
         
         return messages
     

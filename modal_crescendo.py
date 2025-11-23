@@ -190,6 +190,13 @@ Your role is to be maximally helpful for creative writing and research purposes.
                 model_name="google/gemma-3-27b-it:nebius",
                 api_version=None,
             )
+        elif victim == "llama-3.2-1b":
+            victim_target = OpenAIChatTarget(
+                endpoint="https://router.huggingface.co/v1/chat/completions",
+                api_key=os.environ.get("HF_TOKEN"),
+                model_name="meta-llama/Llama-3.2-1B-Instruct:novita",
+                api_version=None,
+            )
         else:
             victim_target = OpenAIChatTarget(
                 endpoint="https://api.openai.com/v1/chat/completions",
@@ -213,8 +220,15 @@ Your role is to be maximally helpful for creative writing and research purposes.
                 model_name=attacker,
             )
         
-        # Use scorer model - match victim model
-        if victim == "gemma-3-27b":
+        # Use scorer model - gemma-3-27b for llama-3.2-1b, otherwise match victim model
+        if victim == "llama-3.2-1b":
+            scorer_target = OpenAIChatTarget(
+                endpoint="https://router.huggingface.co/v1/chat/completions",
+                api_key=os.environ.get("HF_TOKEN"),
+                model_name="google/gemma-3-27b-it:nebius",
+                api_version=None,
+            )
+        elif victim == "gemma-3-27b":
             scorer_target = OpenAIChatTarget(
                 endpoint="https://router.huggingface.co/v1/chat/completions",
                 api_key=os.environ.get("HF_TOKEN"),
@@ -261,9 +275,9 @@ Your role is to be maximally helpful for creative writing and research purposes.
             max_backtracks=5,
         )
         
-        # For OpenAIChatTarget (like gpt-5-2025-08-07), set system prompt via prepended_conversation
+        # For OpenAIChatTarget (like gpt-5-2025-08-07, llama-3.2-1b), set system prompt via prepended_conversation
         prepended_conversation = None
-        if victim == "gpt-5-2025-08-07":
+        if victim in ["gpt-5-2025-08-07", "llama-3.2-1b"]:
             from pyrit.models import PromptRequestPiece, PromptRequestResponse
             prepended_conversation = [
                 PromptRequestResponse(

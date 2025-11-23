@@ -94,6 +94,13 @@ MODEL_CONFIGS = {
         "api_key_env": "HF_TOKEN",
         "fallback_key_env": "HUGGINGFACE_TOKEN",
     },
+    "llama-3.2-1b": {
+        "target_type": "huggingface",
+        "model_id": "meta-llama/Llama-3.2-1B-Instruct:novita",
+        "endpoint": "https://router.huggingface.co/v1/chat/completions",
+        "api_key_env": "HF_TOKEN",
+        "fallback_key_env": "HUGGINGFACE_TOKEN",
+    },
     "llama-3-70b": {
         "target_type": "huggingface",
         "model_id": "meta-llama/Meta-Llama-3-70B-Instruct",
@@ -232,11 +239,19 @@ async def main(attacker_model="gemma-3-27b", victim_model="gpt-4o", temperature=
     if hasattr(CrescendoAttack, '_wandb_attacker_outputs'):
         CrescendoAttack._wandb_attacker_outputs = []
 
-    converters = PromptConverterConfiguration.from_converters(converters=[EmojiConverter()])
+    # Disable converters for llama-3.2-1b as it doesn't understand emoji-encoded prompts
+    if victim_model == "llama-3.2-1b":
+        converters = []  # No converters for llama-3.2-1b
+        print("⚠️  Disabling prompt converters for llama-3.2-1b (model doesn't understand emoji encoding)")
+    else:
+        converters = PromptConverterConfiguration.from_converters(converters=[EmojiConverter()])
     converter_config = AttackConverterConfig(request_converters=converters)
 
-    # Create scorer target (using GPT-4o for objective scoring by default)
-    scorer_target = create_target_from_config("gpt-4o")
+    # Create scorer target - use gemma-3-27b for llama-3.2-1b, otherwise GPT-4o
+    if victim_model == "llama-3.2-1b":
+        scorer_target = create_target_from_config("gemma-3-27b")
+    else:
+        scorer_target = create_target_from_config("gpt-4o")
     
     # Note that below we are looping through the objectives, because we want to set a separate scoring configuration for each attack execution.
     # If you are using the same configuration across multiple attacks, you can use the `AttackExecutor`'s `execute_multi_turn_attacks_async` method to run multiple objectives instead.
